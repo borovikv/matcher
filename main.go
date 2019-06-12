@@ -4,85 +4,54 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"os"
-	"strings"
-	"time"
 )
 
-const targetFiles = ".wav"
-const inputSize = 180    // equal or smaller that input files
-const sampleRate = 48000 // sample rate of input files
-
-const minBitDistance = 8 // hamming distance
-const minLength = 5      // min common region to be validated (seconds)
-
-const maxWorkers = 5 // max paralel workers
-
-var results map[string]SearchResult
-var start time.Time
-
-var jobs chan WorkPair
-var output chan SearchResult
-
-func init() {
-	start = time.Now()
-}
-
 func main() {
-	jobs = make(chan WorkPair, 30)
-	output = make(chan SearchResult, 30)
-	results = make(map[string]SearchResult)
-
-	fmt.Printf("Search range: 0..%v seconds  \n", inputSize)
-
 	allFiles := listAllFiles()
 	pairs := pairUpFiles(allFiles)
-
-	for index := 0; index < maxWorkers; index++ {
-		go analyse(jobs, output)
-	}
-
 	for _, pair := range pairs {
-		fmt.Print(".")
-		jobs <- pair
+		p1, p2 := analyse(pair)
+		fmt.Println(p1, p2)
 	}
-	close(jobs)
-
-	for r := 0; r < len(allFiles)*2-2; r++ {
-		saveResult(<-output)
-	}
-
-	printSuccessfulResults()
-	printFailedResults(allFiles)
-	fmt.Println("Finished in: ", time.Since(start))
 }
 
+/*
+read all waf files
+return [Jojo-01.wav Jojo-02.wav Jojo-03.wav Jojo-04.wav Jojo-05.wav Jojo-06.wav Jojo-07.wav Jojo-08.wav Jojo-09.wav Jojo-10.wav].........
+*/
 func listAllFiles() []string {
-	files, err := ioutil.ReadDir("./")
+	dir := "./fingerprints/"
+	files, err := ioutil.ReadDir(dir)
 	if err != nil {
 		log.Fatal(err)
-		os.Exit(0)
 	}
-
-	fileInfotoString := func(in os.FileInfo) string {
-		return fmt.Sprintf("%s", in.Name())
+	fileNames := make([]string, len(files))
+	for i, f := range files {
+		fileNames[i] = fmt.Sprintf(dir+"%s", f.Name())
 	}
-
-	mapped := fmap(files, fileInfotoString)
-
-	filtered := filter(mapped, func(v string) bool {
-		return strings.Contains(v, targetFiles)
-	})
-
-	return filtered
+	return fileNames
 }
 
-func pairUpFiles(singles []string) []WorkPair {
-	results := make([]WorkPair, len(singles)-1)
+//func pairUpFiles(singles []string) []WorkPair {
+//	results := make([]WorkPair, len(singles)-1)
+//
+//	for i := 0; i < len(singles)-1; i++ {
+//		results[i] = WorkPair{first: singles[i], second: singles[i+1]}
+//	}
+//
+//	return results
+//}
 
-	for i := 0; i < len(singles)-1; i++ {
-		results[i] = WorkPair{first: singles[i], second: singles[i+1]}
+func pairUpFiles(files []string) []WorkPair {
+	results := make([]WorkPair, len(files)*(len(files)+1)/2-4)
+	k := 0
+	for i := 0; i < len(files); i++ {
+		for j := i; j < len(files); j++ {
+			if i != j {
+				results[k] = WorkPair{first: files[i], second: files[j]}
+				k++
+			}
+		}
 	}
-
 	return results
 }

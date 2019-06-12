@@ -1,16 +1,15 @@
 package main
 
 import (
-	"bytes"
-	"fmt"
 	"io/ioutil"
 	"log"
-	"sort"
-
-	"github.com/go-fingerprint/fingerprint"
-	"github.com/go-fingerprint/gochroma"
-	"github.com/steakknife/hamming"
+	"strconv"
+	"strings"
 )
+
+const inputSize = 300
+const minBitDistance = 8 // hamming distance
+const minLength = 5      // min common region to be validated (seconds)
 
 type SearchResult struct {
 	name       string
@@ -22,44 +21,44 @@ type WorkPair struct {
 }
 
 // Analyses the input then writes the results in the global result variable
-func analyse(input chan WorkPair, output chan SearchResult) {
-	for job := range input {
-		audio1, err1 := ioutil.ReadFile(job.first)
-		audio2, err2 := ioutil.ReadFile(job.second)
+func analyse(pair WorkPair) (SearchResult, SearchResult) {
+	audio1 := readInts(pair.first)
+	audio2 := readInts(pair.second)
 
-		if err1 != nil || err2 != nil {
-			log.Fatal(err1, err2)
-		}
+	p1start, p1end, p2start, p2end := searchIntro(audio1, audio2)
 
-		fpcalc := gochroma.New(gochroma.AlgorithmDefault)
-		defer fpcalc.Close()
+	r1 := SearchResult{name: pair.first, start: p1start, end: p1end}
+	r2 := SearchResult{name: pair.second, start: p2start, end: p2end}
 
-		p1start, p1end, p2start, p2end := searchIntro(trimHeader(audio1), trimHeader(audio2), fpcalc)
-
-		r1 := SearchResult{name: job.first, start: p1start, end: p1end}
-		r2 := SearchResult{name: job.second, start: p2start, end: p2end}
-
-		output <- r1
-		output <- r2
-	}
+	return r1, r2
 }
 
-func searchIntro(audio1 []byte, audio2 []byte, fpcalc *gochroma.Printer) (float64, float64, float64, float64) {
-	// Trim byte slices
-	trimmedData1 := trim(audio1, inputSize, 0)
-	trimmedData2 := trim(audio2, inputSize, 0)
-
-	r1 := bytes.NewReader(trimmedData1)
-	r2 := bytes.NewReader(trimmedData2)
-
-	// Get fingerprints as a slices of 32-bit integers
-	fprint1, err1 := getFingerprint(r1, fpcalc)
-
-	fprint2, err2 := getFingerprint(r2, fpcalc)
-	if err1 != nil || err2 != nil {
-		log.Fatal(err1, err2)
+func readInts(fname string) (nums []int64) {
+	b, err := ioutil.ReadFile(fname)
+	if err != nil {
+		log.Fatal(err)
 	}
 
+	lines := strings.Split(string(b), ",")
+	// Assign cap to avoid resize on every append.
+	nums = make([]int64, 0, len(lines))
+
+	for _, l := range lines {
+		// Empty line occurs at the end of the file when we use Split.
+		if len(l) == 0 {
+			continue
+		}
+		n, err := strconv.ParseInt(strings.Replace(l, "\n", "", -1), 10, 64)
+		if err != nil {
+			log.Fatal(err)
+		}
+		nums = append(nums, n)
+	}
+
+	return nums
+}
+
+func searchIntro(fprint1 []int64, fprint2 []int64) (float64, float64, float64, float64) {
 	// If lenghts/2 are not whole numbers trim them down a bit
 	if len(fprint1)%2 != 0 {
 		fprint1 = fprint1[0 : len(fprint1)-1]
@@ -111,37 +110,27 @@ func searchIntro(audio1 []byte, audio2 []byte, fpcalc *gochroma.Printer) (float6
 	return firstFileRegionStart, firstFileRegionEnd, secondFileRegionStart, secondFileRegionEnd
 }
 
-// Get fingerprints as a slices of 32-bit integers
-func getFingerprint(r *bytes.Reader, fpcalc *gochroma.Printer) ([]int32, error) {
-	return fpcalc.RawFingerprint(
-		fingerprint.RawInfo{
-			Src:        r,
-			Channels:   1,
-			Rate:       sampleRate,
-			MaxSeconds: inputSize,
-		})
-}
-
 // Returns the offset at wich audio aligns the best
 // Value is positive if first audio is late
-func getBestOffset(f1 []int32, f2 []int32) int {
-	len := len(f1)
-	iterations := len + 1 //one for the middle ground, 0 index
+func getBestOffset(f1 []int64, f2 []int64) int {
+	N := len(f1)
+	endOfArray := N - 1
+	iterations := N + 1 //one for the middle ground, 0 index
 
-	diff := (len / 2) - 1
+	diff := N/2 - 1
 
-	a := (len / 2)
-	b := (len) - 1
+	a := N / 2
+	b := endOfArray
 	x := 0
-	y := (len / 2) - 1
+	y := N/2 - 1
+	upper := abs(a - b)
 
 	output := make([]float64, iterations)
 
 	for i := 0; i < iterations; i++ {
-		upper := abs(a - b)
-		output[i] = getMatchScore(f1[a:a+upper], f2[x:x+upper])
+		output[i] = Compare(f1[a:a+upper], f2[x:x+upper])
 
-		a = clip(a-1, 0, len-1)
+		a = clip(a-1, 0, endOfArray)
 
 		bVal := func() int {
 			if diff < 0 {
@@ -149,7 +138,7 @@ func getBestOffset(f1 []int32, f2 []int32) int {
 			}
 			return b
 		}
-		b = clip(bVal(), 0, len-1)
+		b = clip(bVal(), 0, endOfArray)
 
 		xVal := func() int {
 			if diff < 0 {
@@ -157,7 +146,7 @@ func getBestOffset(f1 []int32, f2 []int32) int {
 			}
 			return x
 		}
-		x = clip(xVal(), 0, len-1)
+		x = clip(xVal(), 0, endOfArray)
 
 		yVal := func() int {
 			if diff >= 0 {
@@ -165,7 +154,7 @@ func getBestOffset(f1 []int32, f2 []int32) int {
 			}
 			return y
 		}
-		y = clip(yVal(), 0, len-1)
+		y = clip(yVal(), 0, endOfArray)
 
 		diff--
 	}
@@ -174,34 +163,23 @@ func getBestOffset(f1 []int32, f2 []int32) int {
 	return (iterations-1)/2 - index
 }
 
-// Compares two fingerprints
-func getMatchScore(f1 []int32, f2 []int32) float64 {
-	s, err := fingerprint.Compare(f1, f2)
-
-	if err != nil {
-		return 0.0
-	}
-
-	return s
-}
-
 //Returns the trimmed arrays so the fingerprints data lines up
-func getAllingedFingerprints(offset int, f1 []int32, f2 []int32) ([]int32, []int32) {
+func getAllingedFingerprints(offset int, f1 []int64, f2 []int64) ([]int64, []int64) {
 	if offset >= 0 {
-		offsetCorrectedF1 := f1[offset:len(f1)]
+		offsetCorrectedF1 := f1[offset:]
 		offsetCorrectedF2 := f2[0 : len(f2)-offset]
 		return offsetCorrectedF1, offsetCorrectedF2
 	}
 
 	offsetCorrectedF1 := f1[0 : len(f1)-abs(offset)]
-	offsetCorrectedF2 := f2[abs(offset):len(f2)]
+	offsetCorrectedF2 := f2[abs(offset):]
 	return offsetCorrectedF1, offsetCorrectedF2
 }
 
-func hammItUp(f1 []int32, f2 []int32) []int {
+func hammItUp(f1 []int64, f2 []int64) []int {
 	result := make([]int, len(f1))
 	for i := 0; i < len(f1); i++ {
-		result[i] = hamming.Int32(f1[i], f2[i])
+		result[i] = CountBitsUint64(f1[i] ^ f2[i])
 	}
 
 	return result
@@ -240,37 +218,44 @@ func nextOnesAreAlsoSmall(arr []int, index int, upperLimit int) bool {
 	return false
 }
 
-func printSuccessfulResults() {
-	fmt.Println("\n \n Found common regions in:")
+const (
+	bitsperint = 64
+)
 
-	sortedKeys := make([]string, len(results))
+func Compare(fprint1, fprint2 []int64) float64 {
+	dist := 0
 
-	ii := 0
-	for key := range results {
-		sortedKeys[ii] = key
-		ii++
+	for i, sub := range fprint1 {
+		dist += myHamming(sub, fprint2[i])
 	}
-	sort.Strings(sortedKeys)
 
-	for i := range sortedKeys {
-		value := results[sortedKeys[i]]
-		fmt.Printf("%s intro starts at: %.1f ends at: %.1f\n", value.name, value.start, value.end)
-	}
+	score := 1 - float64(dist)/float64(len(fprint1)*bitsperint)
+	return score
 }
 
-func printFailedResults(allFiles []string) {
-	fmt.Printf("\nNo significant results found in range: 0..%v in: \n", inputSize)
+func myHamming(a, b int64) (dist int) {
+	dist = strings.Count(strconv.FormatInt(int64(a^b), 2), "1")
+	return dist
+}
 
-	var allFailedResults []string
+const (
+	m1q uint64 = 0x5555555555555555
+	m2q        = 0x3333333333333333
+	m4q        = 0x0f0f0f0f0f0f0f0f
+	hq         = 0x0101010101010101
+)
 
-	for i := range allFiles {
-		key := allFiles[i]
-		if (results[key] == SearchResult{name: "", start: 0, end: 0}) {
-			allFailedResults = append(allFailedResults, key)
-		}
-	}
+func CountBitsUint64(e int64) int {
+	x := uint64(e)
+	// put count of each 2 bits into those 2 bits
+	x -= (x >> 1) & m1q
 
-	for i := range allFailedResults {
-		fmt.Println(allFailedResults[i])
-	}
+	// put count of each 4 bits into those 4 bits
+	x = (x & m2q) + ((x >> 2) & m2q)
+
+	// put count of each 8 bits into those 8 bits
+	x = (x + (x >> 4)) & m4q
+
+	// returns left 8 bits of x + (x<<8) + (x<<16) + (x<<24) + ...
+	return int((x * hq) >> 56)
 }
